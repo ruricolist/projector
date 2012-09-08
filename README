@@ -1,0 +1,53 @@
+The natural unit of software development today is the project, not
+the file. Emacs excels within the file, and lately it has acquired
+some IDE-like capabilities for languages that require them. But
+there is still need for a simple, fast, and pervasive mechanism for
+discovering and navigating projects. Such a mechanism should be
+scalable to large projects, mostly free of dependencies, and
+integrated with the rest of Emacs.
+
+This is what Projector is for. Projector detects projects and
+maintains tags tables for them, automatically and in the
+background. Using this data, it provides interactive (Ido-powered)
+navigation between buffers, files, and definitions within projects,
+as well as navigation between them.
+
+In addition, for many commands, Projector defines a version that
+works on the entire project as if it were a single file. For
+example, M-x `edit-project' brings up the project in a single Dired
+buffer, and M-x `occur-in-project' does what it says.
+(Incidentally, `occur-in-project' with `occur-edit-mode' is
+indispensable.)
+
+To browse a list of all Projector commands, try M-x
+`apropos-projector'.
+
+The only key sequences Projector explicitly binds are for finding
+tags. The default bindings are incompatible with how Projector
+handles tags files.
+
+Projector is written from the point of view that a project is not
+just a set of files, but a mental context. Once you have opened a
+project, you want to keep that project in front of you until you
+explictly set it aside.
+
+The algorithm that Emacs uses to replace killed buffers violates
+this principle. Thus, when you kill a buffer, Projector arranges
+for another buffer in the same project to replace the killed one.
+This ensures that the current project remains current as long as
+possible.
+
+Usage:
+(require 'projector)
+(projector-mode 1)
+
+Try M-x `apropos-projector' for a list of commands. The variable
+`projector-map' holds an example keymap you might find useful.
+
+(global-set-key (kbd "C-z") projector-map)
+
+Note that Projector depends heavily on lexical binding. It will not
+work in versions of Emacs earlier than 24.
+
+Projector depends on GNU find. If it is not in the path, you should
+set `projector-find-program' to point to it.
