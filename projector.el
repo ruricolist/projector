@@ -289,12 +289,14 @@ buffer or the value of `list-buffers-directory'."
 (eval-when-compile
   (defsubst string-suffix-p (str1 str2 &optional ignore-case)
     "Return non-nil if STR1 is a suffix of STR2."
-    (assert (> (length str2) (length str1)))
-    ;; T means a complete match, a number means a partial match or no match.
-    (not (numberp (compare-strings
-                   str1 nil nil
-                   str2 (- (length str2) (length str1)) nil
-                   ignore-case)))))
+
+    (if (< (length str2) (length str1))
+        nil
+      ;; T means a complete match, a number means a partial match or no match.
+      (not (numberp (compare-strings
+                     str1 nil nil
+                     str2 (- (length str2) (length str1)) nil
+                     ignore-case))))))
 
 (defun projector-remove-suffix (suffix str)
   "Return STR sans SUFFIX, or just STR."
@@ -312,8 +314,8 @@ matters when one file is relative and the other is absolute.)"
    (expand-file-name file root)))
 
 (defun* projector-map-path (fn &optional (file
-                                          (or buffer-file-name
-                                              list-buffers-directory)))
+                                         (or buffer-file-name
+                                             list-buffers-directory)))
   "Call FN on every directory in the path of FILE.
 
 Uses `locate-dominating-stop-dir-regexp'."
@@ -383,7 +385,7 @@ I.e. for FILE.gz, return FILE."
           file))))
 
 (defun projector-wait (proc msg)
-  "Display MSG until PROC to finishes.
+  "Display MSG until PROC finishes.
 Nil for PROC means the current buffer's process."
   (when-let (proc (or proc (get-buffer-process (current-buffer))))
     (with-temp-message msg
@@ -1147,7 +1149,7 @@ FILES."
 (defun projector-recent ()
   "If `recentf' is available, return recent project files."
   (if (boundp 'recentf-list)
-      (intersection (projector-files t) recentf-list)))
+      (intersection (projector-files t) recentf-list :test #'equal)))
 
 (defun projector-not-recent ()
   "If `recentf' is loaded, return project files not accessed
@@ -1224,7 +1226,7 @@ first."
                                               (offset 1000)
                                               (factor 3))
   "The search logic from `etags-goto-tag-location'.
-Look for a match within a windw of OFFSET chars, growing by a
+Look for a match within a window of OFFSET chars, growing by a
 factor of FACTOR with each iteration."
   (do ((startpos (point))
        (offset offset (* factor offset))
