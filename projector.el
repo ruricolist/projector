@@ -170,7 +170,7 @@ wildcards."
                      ".class" ".dll" ".o" ".so"
                      ".sql" ".sqlite" ".db" "#"
                      ".project" ".iml"
-                     ".DS_Store"))))
+                     ".DS_Store" ".min.js"))))
      #'string-lessp))
   "List of extensions to omit from projects.
 
