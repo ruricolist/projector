@@ -1,6 +1,6 @@
 ;;; projector.el --- project-oriented Emacs -*- lexical-binding: t -*-
 
-;; Copyright (C) 2009, 2010, 2011, 2012 Paul M. Rodriguez
+;; Copyright (C) 2009, 2010, 2011, 2012, 2013 Paul M. Rodriguez
 
 ;; Author: Paul M. Rodriguez <pmr@ruricolist.com>
 ;; Created: 2009-12-11
@@ -243,6 +243,12 @@ provided by Exuberant Ctags."
     `(if-let ,bindings
          (progn ,@then))))
 
+(eval-when-compile
+  (defmacro defparameter (name value &optional docstring)
+    `(progn
+       (defvar ,name nil ,docstring)
+       (setq-default ,name ,value))))
+
 (defcustom projector-trust-default-directory-modes
   '(magit-mode occur-mode)
   "Major modes where the project can be inferred from
@@ -418,11 +424,14 @@ result."
                     (apply function args))
             value))))))
 
+(defun projector-vc-backend (file)
+  (ignore-errors (vc-responsible-backend (expand-file-name file))))
+
 (defalias 'projector-vc-root
   (projector-memoize
    (lambda (file)
      (unless (file-remote-p file)
-       (when-let (backend (vc-backend file))
+       (when-let (backend (projector-vc-backend file))
          (expand-file-name
           (vc-call-backend backend 'root file))))))
   "The nearest version-controlled directory to FILE.
@@ -608,7 +617,7 @@ another project buffer after it is killed."
   .oak .sch .scheme .SCM .scm .SM .sm .ss .t .bib .clo .cls .ltx
   .sty .TeX .tex .texi .texinfo .txi .y .y++ .ym .yxx .yy"
                   nil t))
-  "File extensions known to be supported by GNU Etags.")
+  "File names and extensions known to be supported by GNU Etags.")
 
 
 ;;;; Updating.
@@ -905,59 +914,83 @@ Whether a project is small depends on the value of
 
 ;;;; Building the find command.
 
-;; Dynamic parameters.
-;; We want `find' to return relative file names, by default, so we can
-;; expand them properly when the project is remote.
-(defvar projector-find-dir    ".")
-(defvar projector-find-type   "-type f")
-(defvar projector-find-action  nil)
-(defvar projector-find-exec    nil)
-(defvar projector-find-mtime   nil)
+(defparameter projector-vc-listers
+  '((Git . "git ls-files -z")
+    (Hg . "hg locate -0"))
+  "Command to ask a given VC backend for a null-delimited list of
+  the files it manages.")
 
-(defun projector-find-command ()
+(defun* projector-find-command/vc (&key dir type action)
+  (or (when-let (lister (cdr (assoc (projector-vc-backend dir) projector-vc-listers)))
+        (if action
+            (concat lister " | xargs -0 " action)
+          lister))
+      (projector-find-command/find :dir dir :type type :action action)))
+
+(defun projector-files/vc ()
+  (let ((dir (projector-root-safe)))
+    (when (assoc (projector-vc-backend dir) projector-vc-listers)
+      (split-string
+       (shell-command-to-string
+        (projector-find-command/vc
+         :dir dir
+         :action nil))
+       "[ ]"))))
+
+;; NB. We want `find' to return relative file names, by default, so we
+;; can expand them properly when the project is remote.
+
+(defun* projector-find-command/find (&key mtime type dir action)
+  (concat
+   (format-spec
+    ;; This way of building the parameters for `find' is adapted, with
+    ;; modifications, from `rgrep' (q.v.).
+    "%f %d %m \\( -path %D \\) -prune -o \! \\( -name '.' -o -iname %X \\) %t "
+    (format-spec-make
+     ?f projector-find-program
+     ?d dir
+     ?m (if mtime (format-time-string "-newermt \"@%s\"" mtime) "")
+     ?t (or type "")
+     ;; Exclude these directores.
+     ?D (mapconcat (lambda (arg)
+                     (concat "\\*/" arg))
+                   (projector-global+local 'projector-directory-exclusion-list)
+                   " -o -path ")
+     ;; Ignore these extensions.
+     ?X (mapconcat (lambda (arg)
+                     (concat "\\*" arg))
+                   (projector-global+local 'projector-ignored-extensions)
+                   " -o -iname ")))
+   (if action
+       (concat "-print0 | xargs -0 " action)
+     "-print")))
+
+(defun* projector-find-command (&key action mtime
+                                     (type "-type f")
+                                     (dir "."))
   "Return command to run `find'."
-  (format-spec
-   ;; This way of building the parameters for `find' is adapted, with
-   ;; modifications, from `rgrep' (q.v.).
-   "%f %d %m \\( -path %D \\) -prune -o \! \\( -name '.' -o -iname %X \\) %t %a"
-   (format-spec-make
-    ?f projector-find-program
-    ?d projector-find-dir
-    ?m (if projector-find-mtime
-           (format-time-string "-newermt \"@%s\"" projector-find-mtime)
-         "")
-    ?t projector-find-type
-    ?a (if projector-find-action
-           (concat "-print0 | xargs -0 " projector-find-action)
-         "-print")
-    ;; Exclude these directores.
-    ?D (mapconcat (lambda (arg)
-                    (concat "\\*/" arg))
-                  (projector-global+local 'projector-directory-exclusion-list)
-                  " -o -path ")
-    ;; Ignore these extensions.
-    ?X (mapconcat (lambda (arg)
-                    (concat "\\*" arg))
-                  (projector-global+local 'projector-ignored-extensions)
-                  " -o -iname "))))
+  (if mtime
+      (projector-find-command/find :mtime mtime :type type :dir dir
+                                   :action action)
+    (projector-find-command/vc :dir dir :type type :action action)))
 
-(defun projector-start-find-process (name buffer)
+(defun* projector-start-find-process (&key name buffer action mtime type)
   ;; Use a pipe as it is faster, especially with a filter.
   (let ((process-connection-type nil))
-   (start-file-process-shell-command
-    name buffer (projector-find-command))))
+    (start-file-process-shell-command
+     name buffer
+     (projector-find-command
+      :action action :mtime mtime :type type))))
 
 (defun start-gnu-etags (dir mtime)
-  (let ((projector-find-action
-         (concat projector-etags-program " -o -"))
-        (projector-find-mtime mtime)
-        (default-directory dir))
+  (let ((default-directory dir))
     (projector-start-find-process
-     (format "%s (gnu etags)" (abbreviate-file-name dir))
-     nil)))
+     :mtime mtime
+     :name (format "%s (gnu etags)" (abbreviate-file-name dir))
+     :action (concat projector-etags-program " -o -"))))
 
 (defun start-exuberant-etags (dir)
-  (let ((process-connection-type t)
+  (let ((process-connection-type nil)
         (default-directory dir))
     (start-file-process-shell-command
      (format "%s (exuberant ctags)" (abbreviate-file-name dir))
@@ -989,6 +1022,17 @@ Whether a project is small depends on the value of
 
 (defun projector-project-lockedp (dir)
   (member dir *projector-project-locks*))
+
+(defun projector-printable-char? (char)
+  (aref printable-chars char))
+
+(defun projector-tag-part-valid? (part)
+  "Check that the length of a tag part is plausible: not too
+large (< 1000 chars), and composed exclusively of printable
+chars."
+  (and (stringp part)
+       (< (length part) 1000)
+       (every #'projector-printable-char? part)))
 
 (defun projector-make-etags-filter (dir tags files)
   "Return an Etags process filter.
@@ -1036,27 +1080,29 @@ FILES."
                                 lines (rest lines))
                         (setq fragment (first lines))
                         (return nil))
+                      ;; Clip ridiculously long lines.
                       (let ((line (substring line 0 (min (length line) 10000))))
                         ;; Discard Exuberant Ctags errors
                         (unless (string-prefix-p "etags:" line)
                           (let ((parts (split-string line "[\d\C-a,]")) tag)
-                            (case (length parts)
-                              ;; A file.
-                              (2 (setf file (convert-standard-filename (first parts))))
-                              ;; A direct tag.
-                              (3 (setf tag
-                                       (make-tag :file file
-                                                 :text (first parts)
-                                                 :name (deduce-name (first parts))
-                                                 :line (second parts)
-                                                 :position (third parts))))
-                              ;; A pattern tag.
-                              (4 (setf tag
-                                       (make-tag :file file
-                                                 :text (first parts)
-                                                 :name (second parts)
-                                                 :line (third parts)
-                                                 :position (fourth parts)))))
+                            (when (every #'projector-tag-part-valid? parts)
+                              (case (length parts)
+                                ;; A file.
+                                (2 (setf file (convert-standard-filename (first parts))))
+                                ;; A direct tag.
+                                (3 (setf tag
+                                         (make-tag :file file
+                                                   :text (first parts)
+                                                   :name (deduce-name (first parts))
+                                                   :line (second parts)
+                                                   :position (third parts))))
+                                ;; A pattern tag.
+                                (4 (setf tag
+                                         (make-tag :file file
+                                                   :text (first parts)
+                                                   :name (second parts)
+                                                   :line (third parts)
+                                                   :position (fourth parts))))))
                             (when tag
                               (push tag (gethash (tag-name tag) tags))
                               (push tag (gethash file files))))))))))
@@ -1135,8 +1181,11 @@ FILES."
 (defun projector-files (&optional absolute)
   "Return a list of project files."
   (let ((files
-         (mapcar #'projector-compressed-file-name
-                 (projector-project-files (ensure-project)))))
+         (condition-case err
+             (mapcar #'projector-compressed-file-name
+                     (projector-project-files (ensure-project)))
+           (projector-busy (or (projector-files/vc)
+                               (signal (car err) (cdr err)))))))
     (when absolute
       (setq files
             (mapcar
@@ -1376,7 +1425,8 @@ factor of FACTOR with each iteration."
   (interactive (list (expand-file-name buffer-file-name)))
   (projector-assert-current-project)
   (projector-advance-file file
-                          (sort (projector-files t) #'projector-file-lessp)))
+                          (sort (projector-files t) #'projector-file-lessp))
+  (goto-char (point-min)))
 
 (defun projector-previous-file (file)
   "Edit the previous project file in cyclic order."
@@ -1385,7 +1435,8 @@ factor of FACTOR with each iteration."
   (projector-advance-file file
                           (sort (projector-files t)
                                 (lambda (f1 f2)
-                                  (not (projector-file-lessp f1 f2))))))
+                                  (not (projector-file-lessp f1 f2)))))
+  (goto-char (point-min)))
 
 
 ;;;; Cycling project buffers.
@@ -1638,13 +1689,15 @@ The list of code tags to search for is determined by
 (defun projector-run-grep (regexp root)
   "Run `grep' with REGEXP across project."
   (let* ((default-directory root)
-         (projector-find-action
+         (action
           ;; Use `zgrep' since etags includes compressed files.
           (format "zgrep %s -nH -e %s"
                   (when case-fold-search "-i")
                   (shell-quote-argument regexp))))
     (grep ;; Hide the command.
-     (propertize (projector-find-command) 'invisible t))))
+     (propertize (projector-find-command
+                  :action action)
+                 'invisible t))))
 
 (defun grep-in-project (regexp)
   "Grep project for REGEXP."
@@ -1756,12 +1809,13 @@ This only works when the project is writable in the first place."
                 list-buffers-directory root)
           ;; For project specific exclusions.
           (hack-dir-local-variables-non-file-buffer)
-          (let* ((projector-find-type "") ;Include directories.
-                 ;; Using `dired-actual-switches' makes the listing
-                 ;; sortable.
-                 (projector-find-action (concat "ls " dired-actual-switches))
-                 (proc (projector-start-find-process
-                        "list project" (current-buffer))))
+          (let ((proc (projector-start-find-process
+                       :type "-type f"
+                       :name "list project"
+                       :buffer (current-buffer)
+                       ;; Using `dired-actual-switches' makes the listing
+                       ;; sortable.
+                       :action (concat "ls " dired-actual-switches))))
             (set (make-local-variable 'mode-line-process) '(":%s"))
             ;; No need to reinvent the wheel.
             (set-process-filter    proc 'find-dired-filter)
@@ -1994,7 +2048,7 @@ Cf. `vc-dir'."
 
 ;;;; Projector mode.
 
-(defvar projector-map
+(defparameter projector-map
   (let ((map (make-sparse-keymap)))
     (define-key map "4"     (make-sparse-keymap))
     (define-key map "5"     (make-sparse-keymap))
@@ -2035,13 +2089,15 @@ Cf. `vc-dir'."
     (define-key map "u"     'update-project)
     (define-key map "v"     'vc-in-project)
     (define-key map "x"     'projector-next-buffer)
+    (define-key map "\C-n"  'projector-next-file)
+    (define-key map "\C-p"  'projector-previous-file)
     (define-key map "z"     'projector-previous-buffer)
     (define-key map "\C-s"  'isearch-in-project)
     (define-key map "\M-s"  'isearch-regexp-in-project)
     (define-key map "\C-\M-s" 'isearch-regexp-in-project)
     map))
 
-(defvar projector-mode-map
+(defparameter projector-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map [remap find-tag] 'projector-pop-to-tag)
     (define-key map [remap find-tag-other-window] 'projector-find-tag-other-window)
